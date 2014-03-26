@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from six import itervalues
 
 from . history import (
     index_at_dt,
@@ -64,10 +65,10 @@ class HistoryContainer(object):
         # The overaching panel needs to be large enough to contain the
         # largest history spec
         self.max_days_needed = max(spec.days_needed for spec
-                                   in history_specs.itervalues())
+                                   in itervalues(history_specs))
 
         # The set of fields specified by all history specs
-        self.fields = set(spec.field for spec in history_specs.itervalues())
+        self.fields = set(spec.field for spec in itervalues(history_specs))
 
         self.prior_day_panel = create_initial_day_panel(
             self.max_days_needed, self.fields, initial_sids, initial_dt)
@@ -96,7 +97,7 @@ class HistoryContainer(object):
 
         Called during init and at universe rollovers.
         """
-        for history_spec in self.history_specs.itervalues():
+        for history_spec in itervalues(self.history_specs):
             index = index_at_dt(history_spec, algo_dt)
             index = pd.to_datetime(index)
             frame = pd.DataFrame(
