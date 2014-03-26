@@ -192,6 +192,7 @@ class TradingAlgorithm(object):
         # an algorithm subclass needs to set initialized to True when
         # it is fully initialized.
         self.initialized = False
+        self.initialize(*args, **kwargs)
 
     def initialize(self, *args, **kwargs):
         # store algo reference in global space
@@ -200,12 +201,6 @@ class TradingAlgorithm(object):
             self._initialize(self)
         finally:
             set_algo_instance(None)
-
-        if len(self.history_specs) != 0:
-            self.history_container = HistoryContainer(
-                self.history_specs,
-                self.sim_params.sids,
-                self.sim_params.first_open)
 
     def handle_data(self, data):
         if self.history_container:
@@ -381,7 +376,12 @@ class TradingAlgorithm(object):
             all_sids = [sid for s in self.sources for sid in s.sids]
             self.sim_params.sids = set(all_sids)
 
-        self.initialize()
+        # Create history containers
+        if len(self.history_specs) != 0:
+            self.history_container = HistoryContainer(
+                self.history_specs,
+                self.sim_params.sids,
+                self.sim_params.first_open)
 
         # Create transforms by wrapping them into StatefulTransforms
         self.transforms = []

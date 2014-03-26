@@ -1,7 +1,6 @@
 import zipline.utils.factory as factory
 
 from zipline.test_algorithms import TestAlgorithm
-from zipline.utils.api_support import set_algo_instance
 
 
 def create_test_zipline(**config):
@@ -66,7 +65,11 @@ def create_test_zipline(**config):
                                   factory.create_simulation_parameters())
         )
 
+<<<<<<< HEAD
     # -------------------
+=======
+    #-------------------
+>>>>>>> 8f05e2c... ENH: Move initialize back to __init__ and setting up history to run().
     # Trade Source
     # -------------------
     if 'trade_source' in config:
