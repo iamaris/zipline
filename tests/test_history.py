@@ -650,6 +650,7 @@ def handle_data(context, data):
         """
         algo_text = """
 import talib
+import numpy as np
 
 from zipline.api import history, add_history, record
 
@@ -659,7 +660,7 @@ def initialize(context):
 def handle_data(context, data):
     prices = history(2, '1d', 'price')
 
-    ma_result = talib.MA(prices[0], timeperiod=2)
+    ma_result = talib.MA(np.asarray(prices[0]), timeperiod=2)
     record(ma=ma_result[-1])
 """.strip()
 
