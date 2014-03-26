@@ -4,7 +4,7 @@ from . history import (
     index_at_dt
 )
 
-import history_container
+from . import history_container
 
 __all__ = [
     'HistorySpec',
