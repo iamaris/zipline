@@ -1,6 +1,7 @@
 import zipline.utils.factory as factory
 
 from zipline.test_algorithms import TestAlgorithm
+from zipline.utils.api_support import set_algo_instance
 
 
 def create_test_zipline(**config):
