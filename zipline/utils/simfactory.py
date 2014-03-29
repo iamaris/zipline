@@ -65,11 +65,7 @@ def create_test_zipline(**config):
                                   factory.create_simulation_parameters())
         )
 
-<<<<<<< HEAD
     # -------------------
-=======
-    #-------------------
->>>>>>> 8f05e2c... ENH: Move initialize back to __init__ and setting up history to run().
     # Trade Source
     # -------------------
     if 'trade_source' in config:
