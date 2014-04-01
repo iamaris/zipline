@@ -525,4 +525,4 @@ def handle_data(context, data):
                                   end=end)
         algo = TradingAlgorithm(script=history_algo, data_frequency='minute')
         output = algo.run(source)
-        output
+        self.assertIsNot(output, None)
