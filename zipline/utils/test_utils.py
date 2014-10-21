@@ -1,7 +1,14 @@
+from contextlib import contextmanager
 from logbook import FileHandler
 from zipline.finance.blotter import ORDER_STATUS
 
 from six import itervalues
+
+import pandas as pd
+
+
+def to_utc(time_str):
+    return pd.Timestamp(time_str, tz='US/Eastern').tz_convert('UTC')
 
 
 def setup_logger(test, path='test.log'):
@@ -110,3 +117,15 @@ class ExceptionTransform(object):
 
     def update(self, event):
         assert False, "An assertion message"
+
+
+@contextmanager
+def nullctx():
+    """
+    Null context manager.  Useful for conditionally adding a contextmanager in
+    a single line, e.g.:
+
+    with SomeContextManager() if some_expr else nullcontext:
+        do_stuff()
+    """
+    yield

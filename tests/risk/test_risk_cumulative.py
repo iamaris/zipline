@@ -59,24 +59,25 @@ class TestRisk(unittest.TestCase):
                                               returns['Benchmark Returns'])
 
     def test_algorithm_volatility_06(self):
-        np.testing.assert_almost_equal(
-            ANSWER_KEY.ALGORITHM_CUMULATIVE_VOLATILITY,
-            self.cumulative_metrics_06.metrics.algorithm_volatility.values)
+        algo_vol_answers = answer_key.RISK_CUMULATIVE.volatility
+        for dt, value in algo_vol_answers.iterkv():
+            np.testing.assert_almost_equal(
+                self.cumulative_metrics_06.metrics.algorithm_volatility[dt],
+                value,
+                err_msg="Mismatch at %s" % (dt,))
 
     def test_sharpe_06(self):
         for dt, value in answer_key.RISK_CUMULATIVE.sharpe.iterkv():
             np.testing.assert_almost_equal(
-                value,
                 self.cumulative_metrics_06.metrics.sharpe[dt],
-                decimal=2,
+                value,
                 err_msg="Mismatch at %s" % (dt,))
 
     def test_downside_risk_06(self):
         for dt, value in answer_key.RISK_CUMULATIVE.downside_risk.iterkv():
             np.testing.assert_almost_equal(
-                self.cumulative_metrics_06.metrics.downside_risk[dt],
                 value,
-                decimal=2,
+                self.cumulative_metrics_06.metrics.downside_risk[dt],
                 err_msg="Mismatch at %s" % (dt,))
 
     def test_sortino_06(self):
@@ -84,15 +85,14 @@ class TestRisk(unittest.TestCase):
             np.testing.assert_almost_equal(
                 self.cumulative_metrics_06.metrics.sortino[dt],
                 value,
-                decimal=2,
+                decimal=4,
                 err_msg="Mismatch at %s" % (dt,))
 
     def test_information_06(self):
         for dt, value in answer_key.RISK_CUMULATIVE.information.iterkv():
             np.testing.assert_almost_equal(
-                self.cumulative_metrics_06.metrics.information[dt],
                 value,
-                decimal=2,
+                self.cumulative_metrics_06.metrics.information[dt],
                 err_msg="Mismatch at %s" % (dt,))
 
     def test_alpha_06(self):
@@ -100,15 +100,13 @@ class TestRisk(unittest.TestCase):
             np.testing.assert_almost_equal(
                 self.cumulative_metrics_06.metrics.alpha[dt],
                 value,
-                decimal=2,
                 err_msg="Mismatch at %s" % (dt,))
 
     def test_beta_06(self):
         for dt, value in answer_key.RISK_CUMULATIVE.beta.iterkv():
             np.testing.assert_almost_equal(
-                self.cumulative_metrics_06.metrics.beta[dt],
                 value,
-                decimal=2,
+                self.cumulative_metrics_06.metrics.beta[dt],
                 err_msg="Mismatch at %s" % (dt,))
 
     def test_max_drawdown_06(self):
@@ -116,5 +114,4 @@ class TestRisk(unittest.TestCase):
             np.testing.assert_almost_equal(
                 self.cumulative_metrics_06.max_drawdowns[dt],
                 value,
-                decimal=2,
                 err_msg="Mismatch at %s" % (dt,))

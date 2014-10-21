@@ -54,9 +54,17 @@ class OverrideSlippagePostInit(ZiplineError):
     # Raised if a users script calls override_slippage magic
     # after the initialize method has returned.
     msg = """
-You attempted to override slippage after the simulation has \
-started. You may only call override_slippage in your initialize \
-method.
+You attempted to override slippage outside of `initialize`. \
+You may only call override_slippage in your initialize method.
+""".strip()
+
+
+class RegisterTradingControlPostInit(ZiplineError):
+    # Raised if a user's script register's a trading control after initialize
+    # has been run.
+    msg = """
+You attempted to set a trading control outside of `initialize`. \
+Trading controls may only be set in your initialize method.
 """.strip()
 
 
@@ -78,9 +86,8 @@ class OverrideCommissionPostInit(ZiplineError):
     after the initialize method has returned.
     """
     msg = """
-You attempted to override commission after the simulation has \
-started. You may only call override_commission in your initialize \
-method.
+You attempted to override commission outside of `initialize`. \
+You may only call override_commission in your initialize method.
 """.strip()
 
 
@@ -120,3 +127,55 @@ the corresponding order.
     msg = """
 Transaction volume of {txn} exceeds the order volume of {order}.
 """.strip()
+
+
+class UnsupportedOrderParameters(ZiplineError):
+    """
+    Raised if a set of mutually exclusive parameters are passed to an order
+    call.
+    """
+    msg = "{msg}"
+
+
+class BadOrderParameters(ZiplineError):
+    """
+    Raised if any impossible parameters (nan, negative limit/stop)
+    are passed to an order call.
+    """
+    msg = "{msg}"
+
+
+class OrderDuringInitialize(ZiplineError):
+    """
+    Raised if order is called during initialize()
+    """
+    msg = "{msg}"
+
+
+class TradingControlViolation(ZiplineError):
+    """
+    Raised if an order would violate a constraint set by a TradingControl.
+    """
+    msg = """
+Order for {amount} shares of {sid} violates trading constraint {constraint}.
+""".strip()
+
+
+class IncompatibleHistoryFrequency(ZiplineError):
+    """
+    Raised when a frequency is given to history which is not supported.
+    At least, not yet.
+    """
+    msg = """
+Requested history at frequency '{frequency}' cannot be created with data
+at frequency '{data_frequency}'.
+""".strip()
+
+
+class IncompatibleScheduleFunctionDataFrequency(ZiplineError):
+    """
+    Raised when schedule function is used in daily mode.
+    """
+    msg = """
+    schedule_function may only be used in minute mode.
+    """

@@ -53,10 +53,9 @@ class TestDataFrameSource(TestCase):
         for event in source:
             self.assertTrue('sid' in event)
             self.assertTrue('arbitrary' in event)
-            self.assertTrue('volume' in event)
-            self.assertTrue('price' in event)
+            self.assertTrue(hasattr(event, 'volume'))
+            self.assertTrue(hasattr(event, 'price'))
             self.assertEquals(event['arbitrary'], 1.)
-            self.assertEquals(event['volume'], 1000)
             self.assertEquals(event['sid'], 0)
             self.assertTrue(isinstance(event['volume'], int))
             self.assertTrue(isinstance(event['arbitrary'], float))
@@ -102,7 +101,6 @@ class TestRandomWalkSource(TestCase):
             self.assertLess(event.dt, end)
             self.assertGreater(event.price, 0,
                                "price should never go negative.")
-            self.assertEqual(event.volume, 1000)
             self.assertTrue(13 <= event.dt.hour <= 21,
                             "event.dt.hour == %i, not during market \
                             hours." % event.dt.hour)
@@ -127,7 +125,6 @@ class TestRandomWalkSource(TestCase):
             self.assertLess(event.dt, end)
             self.assertGreater(event.price, 0,
                                "price should never go negative.")
-            self.assertEqual(event.volume, 1000)
             self.assertTrue(13 <= event.dt.hour <= 21,
                             "event.dt.hour == %i, not during market \
                             hours." % event.dt.hour)

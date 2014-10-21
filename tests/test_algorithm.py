@@ -12,38 +12,60 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-from unittest import TestCase
+import datetime
 from datetime import timedelta
+from mock import MagicMock
+from six.moves import range
+from unittest import TestCase
+
 import numpy as np
 import pandas as pd
-from mock import MagicMock
 
-from zipline.utils.test_utils import setup_logger
+from zipline.utils.test_utils import (
+    nullctx,
+    setup_logger
+)
 import zipline.utils.factory as factory
 import zipline.utils.simfactory as simfactory
 
-from zipline.test_algorithms import (TestRegisterTransformAlgorithm,
-                                     RecordAlgorithm,
-                                     TestOrderAlgorithm,
-                                     TestOrderInstantAlgorithm,
-                                     TestOrderValueAlgorithm,
-                                     TestTargetAlgorithm,
-                                     TestOrderPercentAlgorithm,
-                                     TestTargetPercentAlgorithm,
-                                     TestTargetValueAlgorithm,
-                                     EmptyPositionsAlgorithm,
-                                     initialize_noop,
-                                     handle_data_noop,
-                                     initialize_api,
-                                     handle_data_api,
-                                     noop_algo,
-                                     api_algo,
-                                     api_symbol_algo,
-                                     call_all_order_methods,
-                                     record_variables,
-                                     record_float_magic
-                                     )
+from zipline.errors import (
+    OrderDuringInitialize,
+    RegisterTradingControlPostInit,
+    TradingControlViolation,
+)
+from zipline.test_algorithms import (
+    access_account_in_init,
+    access_portfolio_in_init,
+    AmbitiousStopLimitAlgorithm,
+    EmptyPositionsAlgorithm,
+    InvalidOrderAlgorithm,
+    RecordAlgorithm,
+    TestOrderAlgorithm,
+    TestOrderInstantAlgorithm,
+    TestOrderPercentAlgorithm,
+    TestOrderStyleForwardingAlgorithm,
+    TestOrderValueAlgorithm,
+    TestRegisterTransformAlgorithm,
+    TestTargetAlgorithm,
+    TestTargetPercentAlgorithm,
+    TestTargetValueAlgorithm,
+    SetLongOnlyAlgorithm,
+    SetMaxPositionSizeAlgorithm,
+    SetMaxOrderCountAlgorithm,
+    SetMaxOrderSizeAlgorithm,
+    api_algo,
+    api_get_environment_algo,
+    api_symbol_algo,
+    call_all_order_methods,
+    call_order_in_init,
+    handle_data_api,
+    handle_data_noop,
+    initialize_api,
+    initialize_noop,
+    noop_algo,
+    record_float_magic,
+    record_variables,
+)
 
 from zipline.utils.test_utils import drain_zipline, assert_single_position
 
@@ -53,8 +75,10 @@ from zipline.sources import (SpecificEquityTrades,
                              RandomWalkSource)
 
 from zipline.transforms import MovingAverage
+from zipline.finance.execution import LimitOrder
 from zipline.finance.trading import SimulationParameters
 from zipline.utils.api_support import set_algo_instance
+from zipline.utils.events import DateRuleFactory, TimeRuleFactory
 from zipline.algorithm import TradingAlgorithm
 
 
@@ -75,19 +99,130 @@ class TestRecordAlgorithm(TestCase):
 
     def test_record_incr(self):
         algo = RecordAlgorithm(
-            sim_params=self.sim_params,
-            data_frequency='daily')
+            sim_params=self.sim_params)
         output = algo.run(self.source)
 
         np.testing.assert_array_equal(output['incr'].values,
                                       range(1, len(output) + 1))
+        np.testing.assert_array_equal(output['name'].values,
+                                      range(1, len(output) + 1))
+        np.testing.assert_array_equal(output['name2'].values,
+                                      [2] * len(output))
+        np.testing.assert_array_equal(output['name3'].values,
+                                      range(1, len(output) + 1))
+
+
+class TestMiscellaneousAPI(TestCase):
+    def setUp(self):
+        setup_logger(self)
+
+        sids = [1, 2]
+        self.sim_params = factory.create_simulation_parameters(
+            num_days=2,
+            sids=sids,
+            data_frequency='minute',
+            emission_rate='minute',
+        )
+        self.source = factory.create_minutely_trade_source(
+            sids,
+            trade_count=100,
+            sim_params=self.sim_params,
+            concurrent=True,
+        )
+
+    def test_get_open_orders(self):
+
+        def initialize(algo):
+            algo.minute = 0
+
+        def handle_data(algo, data):
+            if algo.minute == 0:
+
+                # Should be filled by the next minute
+                algo.order(1, 1)
+
+                # Won't be filled because the price is too low.
+                algo.order(2, 1, style=LimitOrder(0.01))
+                algo.order(2, 1, style=LimitOrder(0.01))
+                algo.order(2, 1, style=LimitOrder(0.01))
+
+                all_orders = algo.get_open_orders()
+                self.assertEqual(list(all_orders.keys()), [1, 2])
+
+                self.assertEqual(all_orders[1], algo.get_open_orders(1))
+                self.assertEqual(len(all_orders[1]), 1)
+
+                self.assertEqual(all_orders[2], algo.get_open_orders(2))
+                self.assertEqual(len(all_orders[2]), 3)
+
+            if algo.minute == 1:
+                # First order should have filled.
+                # Second order should still be open.
+                all_orders = algo.get_open_orders()
+                self.assertEqual(list(all_orders.keys()), [2])
+
+                self.assertEqual([], algo.get_open_orders(1))
+
+                orders_2 = algo.get_open_orders(2)
+                self.assertEqual(all_orders[2], orders_2)
+                self.assertEqual(len(all_orders[2]), 3)
+
+                for order in orders_2:
+                    algo.cancel_order(order)
+
+                all_orders = algo.get_open_orders()
+                self.assertEqual(all_orders, {})
+
+            algo.minute += 1
+
+        algo = TradingAlgorithm(initialize=initialize,
+                                handle_data=handle_data,
+                                sim_params=self.sim_params)
+        algo.run(self.source)
+
+    def test_schedule_function(self):
+        date_rules = DateRuleFactory
+        time_rules = TimeRuleFactory
+
+        def incrementer(algo, data):
+            algo.func_called += 1
+            self.assertEqual(
+                algo.get_datetime().time(),
+                datetime.time(hour=14, minute=31),
+            )
+
+        def initialize(algo):
+            algo.func_called = 0
+            algo.days = 1
+            algo.date = None
+            algo.schedule_function(
+                func=incrementer,
+                date_rule=date_rules.every_day(),
+                time_rule=time_rules.market_open(),
+            )
+
+        def handle_data(algo, data):
+            if not algo.date:
+                algo.date = algo.get_datetime().date()
+
+            if algo.date < algo.get_datetime().date():
+                algo.days += 1
+                algo.date = algo.get_datetime().date()
+
+        algo = TradingAlgorithm(
+            initialize=initialize,
+            handle_data=handle_data,
+            sim_params=self.sim_params,
+        )
+        algo.run(self.source)
+
+        self.assertEqual(algo.func_called, algo.days)
 
 
 class TestTransformAlgorithm(TestCase):
     def setUp(self):
         setup_logger(self)
         self.sim_params = factory.create_simulation_parameters(num_days=4)
-        setup_logger(self)
 
         trade_history = factory.create_trade_history(
             133,
@@ -113,13 +248,12 @@ class TestTransformAlgorithm(TestCase):
         self.assertEqual(len(algo.sources), 1)
         assert isinstance(algo.sources[0], SpecificEquityTrades)
 
-    def test_multi_source_as_input_no_start_end(self):
-        algo = TestRegisterTransformAlgorithm(
-            sids=[133]
+    def test_invalid_order_parameters(self):
+        algo = InvalidOrderAlgorithm(
+            sids=[133],
+            sim_params=self.sim_params
         )
-
-        with self.assertRaises(AssertionError):
-            algo.run([self.source, self.df_source])
+        algo.run(self.source)
 
     def test_multi_source_as_input(self):
         sim_params = SimulationParameters(
@@ -173,27 +307,17 @@ class TestTransformAlgorithm(TestCase):
         assert algo.registered_transforms['mavg']['class'] is MovingAverage
 
     def test_data_frequency_setting(self):
+        self.sim_params.data_frequency = 'daily'
         algo = TestRegisterTransformAlgorithm(
             sim_params=self.sim_params,
-            data_frequency='daily'
         )
-        self.assertEqual(algo.data_frequency, 'daily')
-        self.assertEqual(algo.annualizer, 250)
+        self.assertEqual(algo.sim_params.data_frequency, 'daily')
 
+        self.sim_params.data_frequency = 'minute'
         algo = TestRegisterTransformAlgorithm(
             sim_params=self.sim_params,
-            data_frequency='minute'
         )
-        self.assertEqual(algo.data_frequency, 'minute')
-        self.assertEqual(algo.annualizer, 250 * 6 * 60)
-
-        algo = TestRegisterTransformAlgorithm(
-            sim_params=self.sim_params,
-            data_frequency='minute',
-            annualizer=10
-        )
-        self.assertEqual(algo.data_frequency, 'minute')
-        self.assertEqual(algo.annualizer, 10)
+        self.assertEqual(algo.sim_params.data_frequency, 'minute')
 
     def test_order_methods(self):
         AlgoClasses = [TestOrderAlgorithm,
@@ -206,25 +330,40 @@ class TestTransformAlgorithm(TestCase):
         for AlgoClass in AlgoClasses:
             algo = AlgoClass(
                 sim_params=self.sim_params,
-                data_frequency='daily'
+            )
+            algo.run(self.df)
+
+    def test_order_method_style_forwarding(self):
+
+        method_names_to_test = ['order',
+                                'order_value',
+                                'order_percent',
+                                'order_target',
+                                'order_target_percent',
+                                'order_target_value']
+
+        for name in method_names_to_test:
+            algo = TestOrderStyleForwardingAlgorithm(
+                sim_params=self.sim_params,
+                instant_fill=False,
+                method_name=name
             )
             algo.run(self.df)
 
     def test_order_instant(self):
         algo = TestOrderInstantAlgorithm(sim_params=self.sim_params,
-                                         data_frequency='daily',
                                          instant_fill=True)
 
         algo.run(self.df)
 
     def test_minute_data(self):
         source = RandomWalkSource(freq='minute',
-                                  start=pd.Timestamp('2000-1-1',
+                                  start=pd.Timestamp('2000-1-3',
                                                      tz='UTC'),
-                                  end=pd.Timestamp('2000-1-1',
+                                  end=pd.Timestamp('2000-1-4',
                                                    tz='UTC'))
+        self.sim_params.data_frequency = 'minute'
         algo = TestOrderInstantAlgorithm(sim_params=self.sim_params,
-                                         data_frequency='minute',
                                          instant_fill=True)
         algo.run(source)
 
@@ -248,13 +387,8 @@ class TestPositions(TestCase):
         self.df_source, self.df = \
             factory.create_test_df_source(self.sim_params)
 
-        self.panel_source, self.panel = \
-            factory.create_test_panel_source(self.sim_params)
-
     def test_empty_portfolio(self):
-        algo = EmptyPositionsAlgorithm(sim_params=self.sim_params,
-                                       data_frequency='daily')
-
+        algo = EmptyPositionsAlgorithm(sim_params=self.sim_params)
         daily_stats = algo.run(self.df)
 
         expected_position_count = [
@@ -267,6 +401,15 @@ class TestPositions(TestCase):
         for i, expected in enumerate(expected_position_count):
             self.assertEqual(daily_stats.ix[i]['num_positions'],
                              expected)
+
+    def test_noop_orders(self):
+
+        algo = AmbitiousStopLimitAlgorithm(sid=1)
+        daily_stats = algo.run(self.source)
+
+        # Verify that possitions are empty for all dates.
+        empty_positions = daily_stats.positions.map(lambda x: len(x) == 0)
+        self.assertTrue(empty_positions.all())
 
 
 class TestAlgoScript(TestCase):
@@ -308,6 +451,13 @@ class TestAlgoScript(TestCase):
     def test_api_calls_string(self):
         algo = TradingAlgorithm(script=api_algo)
         algo.run(self.df)
+
+    def test_api_get_environment(self):
+        environment = 'zipline'
+        algo = TradingAlgorithm(script=api_get_environment_algo,
+                                environment=environment)
+        algo.run(self.df)
+        self.assertEqual(algo.environment, environment)
 
     def test_api_symbol(self):
         algo = TradingAlgorithm(script=api_symbol_algo)
@@ -490,7 +640,8 @@ def handle_data(context, data):
         self._algo_record_float_magic_should_pass('nan')
 
     def test_order_methods(self):
-        """Only test that order methods can be called without error.
+        """
+        Only test that order methods can be called without error.
         Correct filling of orders is tested in zipline.
         """
         test_algo = TradingAlgorithm(
@@ -506,3 +657,303 @@ def handle_data(context, data):
             **self.zipline_test_config)
 
         output, _ = drain_zipline(self, zipline)
+
+    def test_order_in_init(self):
+        """
+        Test that calling order in initialize
+        will raise an error.
+        """
+        with self.assertRaises(OrderDuringInitialize):
+            test_algo = TradingAlgorithm(
+                script=call_order_in_init,
+                sim_params=self.sim_params,
+            )
+            set_algo_instance(test_algo)
+
+    def test_portfolio_in_init(self):
+        """
+        Test that accessing portfolio in init doesn't break.
+        """
+        test_algo = TradingAlgorithm(
+            script=access_portfolio_in_init,
+            sim_params=self.sim_params,
+        )
+        set_algo_instance(test_algo)
+
+        self.zipline_test_config['algorithm'] = test_algo
+        self.zipline_test_config['trade_count'] = 1
+
+        zipline = simfactory.create_test_zipline(
+            **self.zipline_test_config)
+
+        output, _ = drain_zipline(self, zipline)
+
+    def test_account_in_init(self):
+        """
+        Test that accessing account in init doesn't break.
+        """
+        test_algo = TradingAlgorithm(
+            script=access_account_in_init,
+            sim_params=self.sim_params,
+        )
+        set_algo_instance(test_algo)
+
+        self.zipline_test_config['algorithm'] = test_algo
+        self.zipline_test_config['trade_count'] = 1
+
+        zipline = simfactory.create_test_zipline(
+            **self.zipline_test_config)
+
+        output, _ = drain_zipline(self, zipline)
+
+
+class TestHistory(TestCase):
+    def test_history(self):
+        history_algo = """
+from zipline.api import history, add_history
+
+def initialize(context):
+    add_history(10, '1d', 'price')
+
+def handle_data(context, data):
+    df = history(10, '1d', 'price')
+"""
+        start = pd.Timestamp('1991-01-01', tz='UTC')
+        end = pd.Timestamp('1991-01-15', tz='UTC')
+        source = RandomWalkSource(start=start,
+                                  end=end)
+        sim_params = factory.create_simulation_parameters(
+            data_frequency='minute')
+        algo = TradingAlgorithm(script=history_algo, sim_params=sim_params)
+        output = algo.run(source)
+        self.assertIsNot(output, None)
+
+
+class TestTradingControls(TestCase):
+
+    def setUp(self):
+        self.sim_params = factory.create_simulation_parameters(num_days=4)
+        self.sid = 133
+        self.trade_history = factory.create_trade_history(
+            self.sid,
+            [10.0, 10.0, 11.0, 11.0],
+            [100, 100, 100, 300],
+            timedelta(days=1),
+            self.sim_params
+        )
+
+        self.source = SpecificEquityTrades(event_list=self.trade_history)
+
+    def _check_algo(self,
+                    algo,
+                    handle_data,
+                    expected_order_count,
+                    expected_exc):
+
+        algo._handle_data = handle_data
+        with self.assertRaises(expected_exc) if expected_exc else nullctx():
+            algo.run(self.source)
+        self.assertEqual(algo.order_count, expected_order_count)
+        self.source.rewind()
+
+    def check_algo_succeeds(self, algo, handle_data, order_count=4):
+        # Default for order_count assumes one order per handle_data call.
+        self._check_algo(algo, handle_data, order_count, None)
+
+    def check_algo_fails(self, algo, handle_data, order_count):
+        self._check_algo(algo,
+                         handle_data,
+                         order_count,
+                         TradingControlViolation)
+
+    def test_set_max_position_size(self):
+
+        # Buy one share four times.  Should be fine.
+        def handle_data(algo, data):
+            algo.order(self.sid, 1)
+            algo.order_count += 1
+        algo = SetMaxPositionSizeAlgorithm(sid=self.sid,
+                                           max_shares=10,
+                                           max_notional=500.0)
+        self.check_algo_succeeds(algo, handle_data)
+
+        # Buy three shares four times.  Should bail on the fourth before it's
+        # placed.
+        def handle_data(algo, data):
+            algo.order(self.sid, 3)
+            algo.order_count += 1
+
+        algo = SetMaxPositionSizeAlgorithm(sid=self.sid,
+                                           max_shares=10,
+                                           max_notional=500.0)
+        self.check_algo_fails(algo, handle_data, 3)
+
+        # Buy two shares four times. Should bail due to max_notional on the
+        # third attempt.
+        def handle_data(algo, data):
+            algo.order(self.sid, 3)
+            algo.order_count += 1
+
+        algo = SetMaxPositionSizeAlgorithm(sid=self.sid,
+                                           max_shares=10,
+                                           max_notional=61.0)
+        self.check_algo_fails(algo, handle_data, 2)
+
+        # Set the trading control to a different sid, then BUY ALL THE THINGS!.
+        # Should continue normally.
+        def handle_data(algo, data):
+            algo.order(self.sid, 10000)
+            algo.order_count += 1
+        algo = SetMaxPositionSizeAlgorithm(sid=self.sid + 1,
+                                           max_shares=10,
+                                           max_notional=61.0)
+        self.check_algo_succeeds(algo, handle_data)
+
+        # Set the trading control sid to None, then BUY ALL THE THINGS!. Should
+        # fail because setting sid to None makes the control apply to all sids.
+        def handle_data(algo, data):
+            algo.order(self.sid, 10000)
+            algo.order_count += 1
+        algo = SetMaxPositionSizeAlgorithm(max_shares=10, max_notional=61.0)
+        self.check_algo_fails(algo, handle_data, 0)
+
+    def test_set_max_order_size(self):
+
+        # Buy one share.
+        def handle_data(algo, data):
+            algo.order(self.sid, 1)
+            algo.order_count += 1
+        algo = SetMaxOrderSizeAlgorithm(sid=self.sid,
+                                        max_shares=10,
+                                        max_notional=500.0)
+        self.check_algo_succeeds(algo, handle_data)
+
+        # Buy 1, then 2, then 3, then 4 shares.  Bail on the last attempt
+        # because we exceed shares.
+        def handle_data(algo, data):
+            algo.order(self.sid, algo.order_count + 1)
+            algo.order_count += 1
+
+        algo = SetMaxOrderSizeAlgorithm(sid=self.sid,
+                                        max_shares=3,
+                                        max_notional=500.0)
+        self.check_algo_fails(algo, handle_data, 3)
+
+        # Buy 1, then 2, then 3, then 4 shares.  Bail on the last attempt
+        # because we exceed notional.
+        def handle_data(algo, data):
+            algo.order(self.sid, algo.order_count + 1)
+            algo.order_count += 1
+
+        algo = SetMaxOrderSizeAlgorithm(sid=self.sid,
+                                        max_shares=10,
+                                        max_notional=40.0)
+        self.check_algo_fails(algo, handle_data, 3)
+
+        # Set the trading control to a different sid, then BUY ALL THE THINGS!.
+        # Should continue normally.
+        def handle_data(algo, data):
+            algo.order(self.sid, 10000)
+            algo.order_count += 1
+        algo = SetMaxOrderSizeAlgorithm(sid=self.sid + 1,
+                                        max_shares=1,
+                                        max_notional=1.0)
+        self.check_algo_succeeds(algo, handle_data)
+
+        # Set the trading control sid to None, then BUY ALL THE THINGS!.
+        # Should fail because not specifying a sid makes the trading control
+        # apply to all sids.
+        def handle_data(algo, data):
+            algo.order(self.sid, 10000)
+            algo.order_count += 1
+        algo = SetMaxOrderSizeAlgorithm(max_shares=1,
+                                        max_notional=1.0)
+        self.check_algo_fails(algo, handle_data, 0)
+
+    def test_set_max_order_count(self):
+
+        # Override the default setUp to use six-hour intervals instead of full
+        # days so we can exercise trading-session rollover logic.
+        trade_history = factory.create_trade_history(
+            self.sid,
+            [10.0, 10.0, 11.0, 11.0],
+            [100, 100, 100, 300],
+            timedelta(hours=6),
+            self.sim_params
+        )
+        self.source = SpecificEquityTrades(event_list=trade_history)
+
+        def handle_data(algo, data):
+            for i in range(5):
+                algo.order(self.sid, 1)
+                algo.order_count += 1
+
+        algo = SetMaxOrderCountAlgorithm(3)
+        self.check_algo_fails(algo, handle_data, 3)
+
+        # Second call to handle_data is the same day as the first, so the last
+        # order of the second call should fail.
+        algo = SetMaxOrderCountAlgorithm(9)
+        self.check_algo_fails(algo, handle_data, 9)
+
+        # Only ten orders are placed per day, so this should pass even though
+        # in total more than 20 orders are placed.
+        algo = SetMaxOrderCountAlgorithm(10)
+        self.check_algo_succeeds(algo, handle_data, order_count=20)
+
+    def test_long_only(self):
+        # Sell immediately -> fail immediately.
+        def handle_data(algo, data):
+            algo.order(self.sid, -1)
+            algo.order_count += 1
+        algo = SetLongOnlyAlgorithm()
+        self.check_algo_fails(algo, handle_data, 0)
+
+        # Buy on even days, sell on odd days.  Never takes a short position, so
+        # should succeed.
+        def handle_data(algo, data):
+            if (algo.order_count % 2) == 0:
+                algo.order(self.sid, 1)
+            else:
+                algo.order(self.sid, -1)
+            algo.order_count += 1
+        algo = SetLongOnlyAlgorithm()
+        self.check_algo_succeeds(algo, handle_data)
+
+        # Buy on first three days, then sell off holdings.  Should succeed.
+        def handle_data(algo, data):
+            amounts = [1, 1, 1, -3]
+            algo.order(self.sid, amounts[algo.order_count])
+            algo.order_count += 1
+        algo = SetLongOnlyAlgorithm()
+        self.check_algo_succeeds(algo, handle_data)
+
+        # Buy on first three days, then sell off holdings plus an extra share.
+        # Should fail on the last sale.
+        def handle_data(algo, data):
+            amounts = [1, 1, 1, -4]
+            algo.order(self.sid, amounts[algo.order_count])
+            algo.order_count += 1
+        algo = SetLongOnlyAlgorithm()
+        self.check_algo_fails(algo, handle_data, 3)
+
+    def test_register_post_init(self):
+
+        def initialize(algo):
+            algo.initialized = True
+
+        def handle_data(algo, data):
+
+            with self.assertRaises(RegisterTradingControlPostInit):
+                algo.set_max_position_size(self.sid, 1, 1)
+            with self.assertRaises(RegisterTradingControlPostInit):
+                algo.set_max_order_size(self.sid, 1, 1)
+            with self.assertRaises(RegisterTradingControlPostInit):
+                algo.set_max_order_count(1)
+            with self.assertRaises(RegisterTradingControlPostInit):
+                algo.set_long_only()
+
+        algo = TradingAlgorithm(initialize=initialize,
+                                handle_data=handle_data)
+        algo.run(self.source)
+        self.source.rewind()

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Copyright 2013 Quantopian, Inc.
+# Copyright 2014 Quantopian, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,87 +14,49 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import matplotlib.pyplot as plt
+"""Dual Moving Average Crossover algorithm.
 
-from zipline.algorithm import TradingAlgorithm
-from zipline.finance import trading
-from zipline.transforms import MovingAverage
-from zipline.utils.factory import load_from_yahoo
+This algorithm buys apple once its short moving average crosses
+its long moving average (indicating upwards momentum) and sells
+its shares once the averages cross again (indicating downwards
+momentum).
+"""
 
-from datetime import datetime
-import pytz
+from zipline.api import order_target, record, symbol, history, add_history
 
 
-class DualMovingAverage(TradingAlgorithm):
-    """Dual Moving Average Crossover algorithm.
+def initialize(context):
+    # Register 2 histories that track daily prices,
+    # one with a 100 window and one with a 300 day window
+    add_history(100, '1d', 'price')
+    add_history(300, '1d', 'price')
 
-    This algorithm buys apple once its short moving average crosses
-    its long moving average (indicating upwards momentum) and sells
-    its shares once the averages cross again (indicating downwards
-    momentum).
+    context.i = 0
 
-    """
-    def initialize(self, short_window=20, long_window=40):
-        # Add 2 mavg transforms, one with a long window, one
-        # with a short window.
-        self.add_transform(MovingAverage, 'short_mavg', ['price'],
-                           window_length=short_window)
 
-        self.add_transform(MovingAverage, 'long_mavg', ['price'],
-                           window_length=long_window)
+def handle_data(context, data):
+    # Skip first 300 days to get full windows
+    context.i += 1
+    if context.i < 300:
+        return
 
-        # To keep track of whether we invested in the stock or not
-        self.invested = False
+    # Compute averages
+    # history() has to be called with the same params
+    # from above and returns a pandas dataframe.
+    short_mavg = history(100, '1d', 'price').mean()
+    long_mavg = history(300, '1d', 'price').mean()
 
-    def handle_data(self, data):
-        self.short_mavg = data['AAPL'].short_mavg['price']
-        self.long_mavg = data['AAPL'].long_mavg['price']
-        self.buy = False
-        self.sell = False
+    sym = symbol('AAPL')
 
-        if self.short_mavg > self.long_mavg and not self.invested:
-            self.order('AAPL', 5000)
-            self.invested = True
-            self.buy = True
-        elif self.short_mavg < self.long_mavg and self.invested:
-            self.order('AAPL', -5000)
-            self.invested = False
-            self.sell = True
+    # Trading logic
+    if short_mavg[sym] > long_mavg[sym]:
+        # order_target orders as many shares as needed to
+        # achieve the desired number of shares.
+        order_target(sym, 100)
+    elif short_mavg[sym] < long_mavg[sym]:
+        order_target(sym, 0)
 
-        self.record(short_mavg=self.short_mavg,
-                    long_mavg=self.long_mavg,
-                    buy=self.buy,
-                    sell=self.sell)
-
-if __name__ == '__main__':
-    start = datetime(2002, 1, 1, 0, 0, 0, 0, pytz.utc)
-    end = datetime(2003, 1, 1, 0, 0, 0, 0, pytz.utc)
-    data = load_from_yahoo(stocks=['AAPL'], indexes={}, start=start,
-                           end=end)
-
-    dma = DualMovingAverage()
-    results = dma.run(data)
-
-    br = trading.environment.benchmark_returns
-    bm_returns = br[(br.index >= start) & (br.index <= end)]
-    results['benchmark_returns'] = (1 + bm_returns).cumprod().values
-    results['algorithm_returns'] = (1 + results.returns).cumprod()
-    fig = plt.figure()
-    ax1 = fig.add_subplot(211, ylabel='cumulative returns')
-
-    results[['algorithm_returns', 'benchmark_returns']].plot(ax=ax1,
-                                                             sharex=True)
-
-    ax2 = fig.add_subplot(212)
-    data['AAPL'].plot(ax=ax2, color='r')
-    results[['short_mavg', 'long_mavg']].plot(ax=ax2)
-
-    ax2.plot(results.ix[results.buy].index, results.short_mavg[results.buy],
-             '^', markersize=10, color='m')
-    ax2.plot(results.ix[results.sell].index, results.short_mavg[results.sell],
-             'v', markersize=10, color='k')
-    plt.legend(loc=0)
-
-    sharpe = [risk['sharpe'] for risk in dma.risk_report['one_month']]
-    print("Monthly Sharpe ratios: {0}".format(sharpe))
-    plt.gcf().set_size_inches(18, 8)
+    # Save values for later inspection
+    record(AAPL=data[sym].price,
+           short_mavg=short_mavg[sym],
+           long_mavg=long_mavg[sym])

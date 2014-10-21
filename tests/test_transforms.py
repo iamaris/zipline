@@ -15,16 +15,20 @@
 
 import pytz
 import numpy as np
-import pandas as pd
 
 from datetime import timedelta, datetime
-from unittest import TestCase, skip
+from itertools import chain
+from unittest import TestCase
 
+from nose_parameterized import parameterized
 from six.moves import range
 
 from zipline.utils.test_utils import setup_logger
 
-from zipline.protocol import Event
+from zipline.protocol import (
+    DATASOURCE_TYPE,
+    Event,
+)
 from zipline.sources import SpecificEquityTrades
 from zipline.transforms.utils import StatefulTransform, EventWindow
 from zipline.transforms import MovingVWAP
@@ -32,8 +36,6 @@ from zipline.transforms import MovingAverage
 from zipline.transforms import MovingStandardDev
 from zipline.transforms import Returns
 import zipline.utils.factory as factory
-
-from zipline.test_algorithms import TALIBAlgorithm
 
 
 def to_dt(msg):
@@ -50,6 +52,11 @@ class NoopEventWindow(EventWindow):
 
         self.added = []
         self.removed = []
+        self._fields = []
+
+    @property
+    def fields(self):
+        return self._fields
 
     def handle_add(self, event):
         self.added.append(event)
@@ -137,20 +144,53 @@ class TestFinanceTransforms(TestCase):
             timedelta(days=1),
             self.sim_params
         )
-        self.source = SpecificEquityTrades(event_list=trade_history)
+        self.source = trade_history
+
+    def intersperse_custom_events(self, events):
+        """
+        Take a stream of events and return the same stream with a minimal event
+        of type CUSTOM following each trade event.  Used to test graceful
+        handling of CUSTOM events that are missing required transform fields.
+        """
+        return list(
+            chain.from_iterable(
+                (
+                    event,
+                    Event(
+                        initial_values={
+                            'dt': event.dt,
+                            'sid': event.sid,
+                            'source_id': "fake_custom_source",
+                            'type': DATASOURCE_TYPE.CUSTOM
+                        }
+                    )
+                )
+                for event in events
+            )
+        )
 
     def tearDown(self):
         self.log_handler.pop_application()
 
-    def test_vwap(self):
+    @parameterized.expand([
+        ('with_custom', True),
+        ('without_custom', False),
+    ])
+    def test_vwap(self, name, add_custom_events):
         vwap = MovingVWAP(
             market_aware=True,
             window_length=2
         )
+
+        if add_custom_events:
+            self.source = self.intersperse_custom_events(self.source)
+
         transformed = list(vwap.transform(self.source))
 
-        # Output values
-        tnfm_vals = [message[vwap.get_hash()] for message in transformed]
+        # Output values.  Unprocessed custom events will not have a field
+        # corresponding to the transform hash.
+        tnfm_vals = [message[vwap.get_hash()] for message in transformed
+                     if message.type != DATASOURCE_TYPE.CUSTOM]
         # "Hand calculated" values.
         expected = [
             (10.0 * 100) / 100.0,
@@ -164,12 +204,20 @@ class TestFinanceTransforms(TestCase):
         # Output should match the expected.
         self.assertEquals(tnfm_vals, expected)
 
-    def test_returns(self):
+    @parameterized.expand([
+        ('with_custom', True),
+        ('without_custom', False),
+    ])
+    def test_returns(self, name, add_custom_events):
         # Daily returns.
         returns = Returns(1)
 
+        if add_custom_events:
+            self.source = self.intersperse_custom_events(self.source)
+
         transformed = list(returns.transform(self.source))
-        tnfm_vals = [message[returns.get_hash()] for message in transformed]
+        tnfm_vals = [message[returns.get_hash()] for message in transformed
+                     if message.type != DATASOURCE_TYPE.CUSTOM]
 
         # No returns for the first event because we don't have a
         # previous close.
@@ -205,7 +253,11 @@ class TestFinanceTransforms(TestCase):
 
         self.assertEquals(tnfm_vals, expected)
 
-    def test_moving_average(self):
+    @parameterized.expand([
+        ('with_custom', True),
+        ('without_custom', False),
+    ])
+    def test_moving_average(self, name, add_custom_events):
 
         mavg = MovingAverage(
             market_aware=True,
@@ -213,12 +265,17 @@ class TestFinanceTransforms(TestCase):
             window_length=2
         )
 
+        if add_custom_events:
+            self.source = self.intersperse_custom_events(self.source)
+
         transformed = list(mavg.transform(self.source))
         # Output values.
         tnfm_prices = [message[mavg.get_hash()].price
-                       for message in transformed]
+                       for message in transformed
+                       if message.type != DATASOURCE_TYPE.CUSTOM]
         tnfm_volumes = [message[mavg.get_hash()].volume
-                        for message in transformed]
+                        for message in transformed
+                        if message.type != DATASOURCE_TYPE.CUSTOM]
 
         # "Hand-calculated" values
         expected_prices = [
@@ -241,7 +298,11 @@ class TestFinanceTransforms(TestCase):
         self.assertEquals(tnfm_prices, expected_prices)
         self.assertEquals(tnfm_volumes, expected_volumes)
 
-    def test_moving_stddev(self):
+    @parameterized.expand([
+        ('with_custom', True),
+        ('without_custom', False),
+    ])
+    def test_moving_stddev(self, name, add_custom_events):
         trade_history = factory.create_trade_history(
             133,
             [10.0, 15.0, 13.0, 12.0],
@@ -256,10 +317,13 @@ class TestFinanceTransforms(TestCase):
         )
 
         self.source = SpecificEquityTrades(event_list=trade_history)
+        if add_custom_events:
+            self.source = self.intersperse_custom_events(self.source)
 
         transformed = list(stddev.transform(self.source))
 
-        vals = [message[stddev.get_hash()] for message in transformed]
+        vals = [message[stddev.get_hash()] for message in transformed
+                if message.type != DATASOURCE_TYPE.CUSTOM]
 
         expected = [
             None,
@@ -276,126 +340,3 @@ class TestFinanceTransforms(TestCase):
                 self.assertIsNone(v2)
                 continue
             self.assertEquals(round(v1, 5), round(v2, 5))
-
-
-############################################################
-# Test TALIB
-
-import talib
-import zipline.transforms.ta as ta
-
-
-class TestTALIB(TestCase):
-    def setUp(self):
-        setup_logger(self)
-        sim_params = factory.create_simulation_parameters(
-            start=datetime(1990, 1, 1, tzinfo=pytz.utc),
-            end=datetime(1990, 3, 30, tzinfo=pytz.utc))
-        self.source, self.panel = \
-            factory.create_test_panel_ohlc_source(sim_params)
-
-    @skip
-    def test_talib_with_default_params(self):
-        BLACKLIST = ['make_transform', 'BatchTransform',
-                     # TODO: Figure out why MAVP generates a KeyError
-                     'MAVP']
-        names = [name for name in dir(ta) if name[0].isupper()
-                 and name not in BLACKLIST]
-
-        for name in names:
-            print(name)
-            zipline_transform = getattr(ta, name)(sid=0)
-            talib_fn = getattr(talib.abstract, name)
-
-            start = datetime(1990, 1, 1, tzinfo=pytz.utc)
-            end = start + timedelta(days=zipline_transform.lookback + 10)
-            sim_params = factory.create_simulation_parameters(
-                start=start, end=end)
-            source, panel = \
-                factory.create_test_panel_ohlc_source(sim_params)
-
-            algo = TALIBAlgorithm(talib=zipline_transform)
-            algo.run(source)
-
-            zipline_result = np.array(
-                algo.talib_results[zipline_transform][-1])
-
-            talib_data = dict()
-            data = zipline_transform.window
-            # TODO: Figure out if we are clobbering the tests by this
-            # protection against empty windows
-            if not data:
-                continue
-            for key in ['open', 'high', 'low', 'volume']:
-                if key in data:
-                    talib_data[key] = data[key][0].values
-            talib_data['close'] = data['price'][0].values
-            expected_result = talib_fn(talib_data)
-
-            if isinstance(expected_result, list):
-                expected_result = np.array([e[-1] for e in expected_result])
-            else:
-                expected_result = np.array(expected_result[-1])
-            if not (np.all(np.isnan(zipline_result))
-                    and np.all(np.isnan(expected_result))):
-                self.assertTrue(np.allclose(zipline_result, expected_result))
-            else:
-                print('--- NAN')
-
-            # reset generator so next iteration has data
-            # self.source, self.panel = \
-                # factory.create_test_panel_ohlc_source(self.sim_params)
-
-    def test_multiple_talib_with_args(self):
-        zipline_transforms = [ta.MA(timeperiod=10),
-                              ta.MA(timeperiod=25)]
-        talib_fn = talib.abstract.MA
-        algo = TALIBAlgorithm(talib=zipline_transforms)
-        algo.run(self.source)
-        # Test if computed values match those computed by pandas rolling mean.
-        sid = 0
-        talib_values = np.array([x[sid] for x in
-                                 algo.talib_results[zipline_transforms[0]]])
-        np.testing.assert_array_equal(talib_values,
-                                      pd.rolling_mean(self.panel[0]['price'],
-                                                      10).values)
-        talib_values = np.array([x[sid] for x in
-                                 algo.talib_results[zipline_transforms[1]]])
-        np.testing.assert_array_equal(talib_values,
-                                      pd.rolling_mean(self.panel[0]['price'],
-                                                      25).values)
-        for t in zipline_transforms:
-            talib_result = np.array(algo.talib_results[t][-1])
-            talib_data = dict()
-            data = t.window
-            # TODO: Figure out if we are clobbering the tests by this
-            # protection against empty windows
-            if not data:
-                continue
-            for key in ['open', 'high', 'low', 'volume']:
-                if key in data:
-                    talib_data[key] = data[key][0].values
-            talib_data['close'] = data['price'][0].values
-            expected_result = talib_fn(talib_data, **t.call_kwargs)[-1]
-            np.testing.assert_allclose(talib_result, expected_result)
-
-    def test_talib_with_minute_data(self):
-
-        ma_one_day_minutes = ta.MA(timeperiod=10, bars='minute')
-
-        # Assert that the BatchTransform window length is enough to cover
-        # the amount of minutes in the timeperiod.
-
-        # Here, 10 minutes only needs a window length of 1.
-        self.assertEquals(1, ma_one_day_minutes.window_length)
-
-        # With minutes greater than the 390, i.e. one trading day, we should
-        # have a window_length of two days.
-        ma_two_day_minutes = ta.MA(timeperiod=490, bars='minute')
-        self.assertEquals(2, ma_two_day_minutes.window_length)
-
-        # TODO: Ensure that the lookback into the datapanel is returning
-        # expected results.
-        # Requires supplying minute instead of day data to the unit test.
-        # When adding test data, should add more minute events than the
-        # timeperiod to ensure that lookback is behaving properly.

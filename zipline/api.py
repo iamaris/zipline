@@ -19,7 +19,7 @@
 
 import zipline
 from .finance import (commission, slippage)
-from .utils import math_utils
+from .utils import math_utils, events
 
 from zipline.finance.slippage import (
     FixedSlippage,
@@ -30,18 +30,10 @@ from zipline.finance.slippage import (
 batch_transform = zipline.transforms.BatchTransform
 
 
-def symbol(symbol_str, as_of_date=None):
-    """Default symbol lookup for any source that directly maps the
-    symbol to the identifier (e.g. yahoo finance).
-
-    Keyword argument as_of_date is ignored.
-    """
-    return symbol_str
-
 __all__ = [
-    'symbol',
     'slippage',
     'commission',
+    'events',
     'math_utils',
     'batch_transform',
     'FixedSlippage',

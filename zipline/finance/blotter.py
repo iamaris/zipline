@@ -19,6 +19,8 @@ from copy import copy
 from logbook import Logger
 from collections import defaultdict
 
+from six import text_type
+
 import zipline.errors
 import zipline.protocol as zp
 
@@ -28,7 +30,6 @@ from zipline.finance.slippage import (
     check_order_triggers
 )
 from zipline.finance.commission import PerShare
-import zipline.utils.math_utils as zp_math
 
 log = Logger('Blotter')
 
@@ -37,19 +38,10 @@ from zipline.utils.protocol_utils import Enum
 ORDER_STATUS = Enum(
     'OPEN',
     'FILLED',
-    'CANCELLED'
+    'CANCELLED',
+    'REJECTED',
+    'HELD',
 )
-
-
-# On an order to buy, between .05 below to .95 above a penny, use that penny.
-# On an order to sell, between .05 above to .95 below a penny, use that penny.
-# buy: [.0095, .0195) -> round to .01, sell: (.0005, .0105] -> round to .01
-def round_for_minimum_price_variation(x, is_buy, diff=(0.0095 - .005)):
-    # relies on rounding half away from zero, unlike numpy's bankers' rounding
-    rounded = round(x - (diff if is_buy else -diff), 2)
-    if zp_math.tolerant_equals(rounded, 0.0):
-        return 0.0
-    return rounded
 
 
 class Blotter(object):
@@ -84,7 +76,7 @@ class Blotter(object):
     def set_date(self, dt):
         self.current_dt = dt
 
-    def order(self, sid, amount, limit_price, stop_price, order_id=None):
+    def order(self, sid, amount, style, order_id=None):
 
         # something could be done with amount to further divide
         # between buy by share count OR buy shares up to a dollar amount
@@ -94,29 +86,12 @@ class Blotter(object):
         amount > 0 :: Buy/Cover
         amount < 0 :: Sell/Short
         Market order:    order(sid, amount)
-        Limit order:     order(sid, amount, limit_price)
-        Stop order:      order(sid, amount, None, stop_price)
-        StopLimit order: order(sid, amount, limit_price, stop_price)
+        Limit order:     order(sid, amount, style=LimitOrder(limit_price))
+        Stop order:      order(sid, amount, style=StopOrder(stop_price))
+        StopLimit order: order(sid, amount, style=StopLimitOrder(limit_price,
+                               stop_price))
         """
-
-        # This fixes a bug that if amount is e.g. -27.99999 due to
-        # floating point madness we actually want to treat it as -28.
-        def almost_equal_to(a, eps=1e-4):
-            if abs(a - round(a)) <= eps:
-                return round(a)
-            else:
-                return a
-
-        # Fractional shares are not supported.
-        amount = int(almost_equal_to(amount))
-
-        # just validates amount and passes rest on to TransactionSimulator
-        # Tell the user if they try to buy 0 shares of something.
         if amount == 0:
-            zero_message = "Requested to trade zero shares of {psid}".format(
-                psid=sid
-            )
-            log.debug(zero_message)
             # Don't bother placing orders for 0 shares.
             return
         elif amount > self.max_shares:
@@ -125,15 +100,13 @@ class Blotter(object):
             raise OverflowError("Can't order more than %d shares" %
                                 self.max_shares)
 
-        if limit_price:
-            limit_price = round_for_minimum_price_variation(limit_price,
-                                                            amount > 0)
+        is_buy = (amount > 0)
         order = Order(
             dt=self.current_dt,
             sid=sid,
             amount=amount,
-            stop=stop_price,
-            limit=limit_price,
+            stop=style.get_stop_price(is_buy),
+            limit=style.get_limit_price(is_buy),
             id=order_id
         )
 
@@ -148,6 +121,7 @@ class Blotter(object):
             return
 
         cur_order = self.orders[order_id]
+
         if cur_order.open:
             order_list = self.open_orders[cur_order.sid]
             if cur_order in order_list:
@@ -156,6 +130,49 @@ class Blotter(object):
             if cur_order in self.new_orders:
                 self.new_orders.remove(cur_order)
             cur_order.cancel()
+            cur_order.dt = self.current_dt
+            # we want this order's new status to be relayed out
+            # along with newly placed orders.
+            self.new_orders.append(cur_order)
+
+    def reject(self, order_id, reason=''):
+        """
+        Mark the given order as 'rejected', which is functionally similar to
+        cancelled. The distinction is that rejections are involuntary (and
+        usually include a message from a broker indicating why the order was
+        rejected) while cancels are typically user-driven.
+        """
+        if order_id not in self.orders:
+            return
+
+        cur_order = self.orders[order_id]
+
+        order_list = self.open_orders[cur_order.sid]
+        if cur_order in order_list:
+            order_list.remove(cur_order)
+
+        if cur_order in self.new_orders:
+            self.new_orders.remove(cur_order)
+        cur_order.reject(reason=reason)
+        cur_order.dt = self.current_dt
+        # we want this order's new status to be relayed out
+        # along with newly placed orders.
+        self.new_orders.append(cur_order)
+
+    def hold(self, order_id, reason=''):
+        """
+        Mark the order with order_id as 'held'. Held is functionally similar
+        to 'open'. When a fill (full or partial) arrives, the status
+        will automatically change back to open/filled as necessary.
+        """
+        if order_id not in self.orders:
+            return
+
+        cur_order = self.orders[order_id]
+        if cur_order.open:
+            if cur_order in self.new_orders:
+                self.new_orders.remove(cur_order)
+            cur_order.hold(reason=reason)
             cur_order.dt = self.current_dt
             # we want this order's new status to be relayed out
             # along with newly placed orders.
@@ -238,12 +255,13 @@ class Order(object):
         # get a string representation of the uuid.
         self.id = id or self.make_id()
         self.dt = dt
+        self.reason = None
         self.created = dt
         self.sid = sid
         self.amount = amount
         self.filled = filled
         self.commission = commission
-        self._cancelled = False
+        self._status = ORDER_STATUS.OPEN
         self.stop = stop
         self.limit = limit
         self.stop_reached = False
@@ -256,7 +274,7 @@ class Order(object):
 
     def to_dict(self):
         py = copy(self.__dict__)
-        for field in ['type', 'direction', '_cancelled']:
+        for field in ['type', 'direction', '_status']:
             del py[field]
         py['status'] = self.status
         return py
@@ -296,26 +314,39 @@ class Order(object):
 
         self.amount = int(self.amount / ratio)
 
-        if self.limit:
+        if self.limit is not None:
             self.limit = round(self.limit * ratio, 2)
 
-        if self.stop:
+        if self.stop is not None:
             self.stop = round(self.stop * ratio, 2)
 
     @property
     def status(self):
-        if self._cancelled:
-            return ORDER_STATUS.CANCELLED
+        if not self.open_amount:
+            return ORDER_STATUS.FILLED
+        elif self._status == ORDER_STATUS.HELD and self.filled:
+            return ORDER_STATUS.OPEN
+        else:
+            return self._status
 
-        return ORDER_STATUS.FILLED \
-            if not self.open_amount else ORDER_STATUS.OPEN
+    @status.setter
+    def status(self, status):
+        self._status = status
 
     def cancel(self):
-        self._cancelled = True
+        self.status = ORDER_STATUS.CANCELLED
+
+    def reject(self, reason=''):
+        self.status = ORDER_STATUS.REJECTED
+        self.reason = reason
+
+    def hold(self, reason=''):
+        self.status = ORDER_STATUS.HELD
+        self.reason = reason
 
     @property
     def open(self):
-        return self.status == ORDER_STATUS.OPEN
+        return self.status in [ORDER_STATUS.OPEN, ORDER_STATUS.HELD]
 
     @property
     def triggered(self):
@@ -324,10 +355,10 @@ class Order(object):
         For a stop order, True IFF stop_reached.
         For a limit order, True IFF limit_reached.
         """
-        if self.stop and not self.stop_reached:
+        if self.stop is not None and not self.stop_reached:
             return False
 
-        if self.limit and not self.limit_reached:
+        if self.limit is not None and not self.limit_reached:
             return False
 
         return True
@@ -335,3 +366,15 @@ class Order(object):
     @property
     def open_amount(self):
         return self.amount - self.filled
+
+    def __repr__(self):
+        """
+        String representation for this object.
+        """
+        return "Order(%s)" % self.to_dict().__repr__()
+
+    def __unicode__(self):
+        """
+        Unicode representation for this object.
+        """
+        return text_type(repr(self))

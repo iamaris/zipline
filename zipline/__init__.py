@@ -20,16 +20,22 @@ Zipline
 # This is *not* a place to dump arbitrary classes/modules for convenience,
 # it is a place to expose the public interfaces.
 
-__version__ = "0.5.11.dev"
+__version__ = "0.7.0"
 
 from . import data
 from . import finance
 from . import gens
 from . import utils
 from . import transforms
-
 from . algorithm import TradingAlgorithm
+
 from . import api
+
+try:
+    ip = get_ipython()  # flake8: noqa
+    ip.register_magic_function(utils.parse_cell_magic, "line_cell", "zipline")
+except:
+    pass
 
 __all__ = [
     'data',
@@ -38,5 +44,5 @@ __all__ = [
     'utils',
     'transforms',
     'api',
-    'TradingAlgorithm'
+    'TradingAlgorithm',
 ]

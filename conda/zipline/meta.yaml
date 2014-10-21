@@ -1,23 +1,16 @@
 package:
   name: zipline
-  version: 0.6.0
+  version: 0.7.0
 
 source:
-  fn: zipline-0.6.0.tar.gz
-  url: https://pypi.python.org/packages/source/z/zipline/zipline-0.6.0.tar.gz
-  md5: 75d818c291df133946bb15a1b08ae0d8
+  fn: zipline-0.7.0.tar.gz
+  url: https://pypi.python.org/packages/source/z/zipline/zipline-0.7.0.tar.gz
+  md5: 62d45c3c0d9a624e787b7e413937f7b4
 
 requirements:
   build:
     - python
-    - pytz
-    - requests
-    - numpy
-    - pandas
-    - scipy
-    - matplotlib
-    - ta-lib
-    - logbook
+    - setuptools
   run:
     - python
     - pytz
@@ -26,7 +19,6 @@ requirements:
     - pandas
     - scipy
     - matplotlib
-    - ta-lib
     - logbook
 
 test:

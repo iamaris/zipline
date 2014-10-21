@@ -33,8 +33,13 @@ Position Tracking
 """
 
 from __future__ import division
+from math import (
+    copysign,
+    floor,
+)
+
 import logbook
-import math
+import zipline.protocol as zp
 
 log = logbook.Logger('Performance')
 
@@ -42,52 +47,43 @@ log = logbook.Logger('Performance')
 class Position(object):
 
     def __init__(self, sid, amount=0, cost_basis=0.0,
-                 last_sale_price=0.0, last_sale_date=None,
-                 dividends=None):
+                 last_sale_price=0.0, last_sale_date=None):
+
         self.sid = sid
         self.amount = amount
         self.cost_basis = cost_basis  # per share
         self.last_sale_price = last_sale_price
         self.last_sale_date = last_sale_date
-        self.dividends = dividends or []
 
-    def update_dividends(self, midnight_utc):
+    def earn_dividend(self, dividend):
         """
-        midnight_utc is the 0 hour for the current (not yet open) trading day.
-        This method will be invoked at the end of the market
-        close handling, before the next market open.
+        Register the number of shares we held at this dividend's ex date so
+        that we can pay out the correct amount on the dividend's pay date.
         """
-        payment = 0.0
-        unpaid_dividends = []
-        for dividend in self.dividends:
-            if midnight_utc == dividend.ex_date:
-                # if we own shares at midnight of the div_ex date
-                # we are entitled to the dividend.
-                dividend.amount_on_ex_date = self.amount
-                if dividend.net_amount:
-                    dividend.payment = self.amount * dividend.net_amount
-                else:
-                    dividend.payment = self.amount * dividend.gross_amount
+        assert dividend['sid'] == self.sid
+        out = {'id': dividend['id']}
 
-            if midnight_utc == dividend.pay_date:
-                # if it is the payment date, include this
-                # dividend's actual payment (calculated on
-                # ex_date)
-                payment += dividend.payment
-            else:
-                unpaid_dividends.append(dividend)
+        # stock dividend
+        if dividend['payment_sid']:
+            out['payment_sid'] = dividend['payment_sid']
+            out['share_count'] = floor(self.amount * float(dividend['ratio']))
 
-        self.dividends = unpaid_dividends
-        return payment
+        # cash dividend
+        if dividend['net_amount']:
+            out['cash_amount'] = self.amount * dividend['net_amount']
+        elif dividend['gross_amount']:
+            out['cash_amount'] = self.amount * dividend['gross_amount']
 
-    def add_dividend(self, dividend):
-        self.dividends.append(dividend)
+        payment_owed = zp.dividend_payment(out)
+        return payment_owed
 
-    # Update the position by the split ratio, and return the
-    # resulting fractional share that will be converted into cash.
-
-    # Returns the unused cash.
     def handle_split(self, split):
+        """
+        Update the position by the split ratio, and return the resulting
+        fractional share that will be converted into cash.
+
+        Returns the unused cash.
+        """
         if self.sid != split.sid:
             raise Exception("updating split with the wrong sid!")
 
@@ -103,16 +99,16 @@ class Position(object):
         # (old_share_count / ratio = new_share_count)
         # (old_price * ratio = new_price)
 
-        # ie, 33.333
+        # e.g., 33.333
         raw_share_count = self.amount / float(ratio)
 
-        # ie, 33
-        full_share_count = math.floor(raw_share_count)
+        # e.g., 33
+        full_share_count = floor(raw_share_count)
 
-        # ie, 0.333
+        # e.g., 0.333
         fractional_share_count = raw_share_count - full_share_count
 
-        # adjust the cost basis to the nearest cent, ie, 60.0
+        # adjust the cost basis to the nearest cent, e.g., 60.0
         new_cost_basis = round(self.cost_basis * ratio, 2)
 
         # adjust the last sale price
@@ -141,8 +137,8 @@ class Position(object):
         if total_shares == 0:
             self.cost_basis = 0.0
         else:
-            prev_direction = math.copysign(1, self.amount)
-            txn_direction = math.copysign(1, txn.amount)
+            prev_direction = copysign(1, self.amount)
+            txn_direction = copysign(1, txn.amount)
 
             if prev_direction != txn_direction:
                 # we're covering a short or closing a position
@@ -155,6 +151,12 @@ class Position(object):
                 txn_cost = txn.amount * txn.price
                 total_cost = prev_cost + txn_cost
                 self.cost_basis = total_cost / total_shares
+
+            # Update the last sale price if txn is
+            # best data we have so far
+            if self.last_sale_date is None or txn.dt > self.last_sale_date:
+                self.last_sale_price = txn.price
+                self.last_sale_date = txn.dt
 
         self.amount = total_shares
 

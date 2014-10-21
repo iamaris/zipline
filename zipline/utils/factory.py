@@ -42,8 +42,9 @@ __all__ = ['load_from_yahoo', 'load_bars_from_yahoo']
 
 def create_simulation_parameters(year=2006, start=None, end=None,
                                  capital_base=float("1.0e5"),
-                                 num_days=None, load=None
-                                 ):
+                                 num_days=None, load=None,
+                                 sids=None, data_frequency='daily',
+                                 emission_rate='daily'):
     """Construct a complete environment with reasonable defaults"""
     if start is None:
         start = datetime(year, 1, 1, tzinfo=pytz.utc)
@@ -59,6 +60,9 @@ def create_simulation_parameters(year=2006, start=None, end=None,
         period_start=start,
         period_end=end,
         capital_base=capital_base,
+        sids=sids,
+        data_frequency=data_frequency,
+        emission_rate=emission_rate,
     )
 
     return sim_params
@@ -137,15 +141,32 @@ def create_dividend(sid, payment, declared_date, ex_date, pay_date):
         'sid': sid,
         'gross_amount': payment,
         'net_amount': payment,
-        'dt': declared_date.replace(hour=0, minute=0, second=0, microsecond=0),
-        'ex_date': ex_date.replace(hour=0, minute=0, second=0, microsecond=0),
-        'pay_date': pay_date.replace(hour=0, minute=0, second=0,
-                                     microsecond=0),
+        'payment_sid': None,
+        'ratio': None,
+        'declared_date': pd.tslib.normalize_date(declared_date),
+        'ex_date': pd.tslib.normalize_date(ex_date),
+        'pay_date': pd.tslib.normalize_date(pay_date),
         'type': DATASOURCE_TYPE.DIVIDEND,
         'source_id': 'MockDividendSource'
     })
 
     return div
+
+
+def create_stock_dividend(sid, payment_sid, ratio, declared_date,
+                          ex_date, pay_date):
+    return Event({
+        'sid': sid,
+        'payment_sid': payment_sid,
+        'ratio': ratio,
+        'net_amount': None,
+        'gross_amount': None,
+        'dt': pd.tslib.normalize_date(declared_date),
+        'ex_date': pd.tslib.normalize_date(ex_date),
+        'pay_date': pd.tslib.normalize_date(pay_date),
+        'type': DATASOURCE_TYPE.DIVIDEND,
+        'source_id': 'MockDividendSource'
+    })
 
 
 def create_split(sid, ratio, date):
@@ -271,7 +292,7 @@ def create_test_df_source(sim_params=None, bars='daily'):
     elif bars == 'minute':
         freq = pd.datetools.Minute()
     else:
-        raise ValueError('%s bars not understood.' % freq)
+        raise ValueError('%s bars not understood.' % bars)
 
     if sim_params:
         index = sim_params.trading_days

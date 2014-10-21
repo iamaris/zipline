@@ -36,7 +36,7 @@ The algorithm must expose methods:
     of the current state of the simulation universe. An example data object:
 
         ..  This outputs the table as an HTML table but for some reason there
-            is no bounding box. Make the previous paragraph ending colon a
+            is no bounding box. Make the previous paraagraph ending colon a
             double-colon to turn this back into blockquoted table in ASCII art.
 
         +-----------------+--------------+----------------+-------------------+
@@ -74,11 +74,20 @@ The algorithm must expose methods:
 from copy import deepcopy
 import numpy as np
 
+from nose.tools import assert_raises
+
 from six.moves import range
 from six import itervalues
 
 from zipline.algorithm import TradingAlgorithm
 from zipline.api import FixedSlippage
+from zipline.errors import UnsupportedOrderParameters
+from zipline.finance.execution import (
+    LimitOrder,
+    MarketOrder,
+    StopLimitOrder,
+    StopOrder,
+)
 
 
 class TestAlgorithm(TradingAlgorithm):
@@ -88,7 +97,12 @@ class TestAlgorithm(TradingAlgorithm):
     at the close of a simulation.
     """
 
-    def initialize(self, sid, amount, order_count, sid_filter=None):
+    def initialize(self,
+                   sid,
+                   amount,
+                   order_count,
+                   sid_filter=None,
+                   slippage=None):
         self.count = order_count
         self.sid = sid
         self.amount = amount
@@ -99,8 +113,11 @@ class TestAlgorithm(TradingAlgorithm):
         else:
             self.sid_filter = [self.sid]
 
+        if slippage is not None:
+            self.set_slippage(slippage)
+
     def handle_data(self, data):
-        # place an order for 100 shares of sid
+        # place an order for amount shares of sid
         if self.incr < self.count:
             self.order(self.sid, self.amount)
             self.incr += 1
@@ -224,12 +241,14 @@ class RecordAlgorithm(TradingAlgorithm):
     def handle_data(self, data):
         self.incr += 1
         self.record(incr=self.incr)
+        name = 'name'
+        self.record(name, self.incr)
+        record(name, self.incr, 'name2', 2, name3=self.incr)
 
 
 class TestOrderAlgorithm(TradingAlgorithm):
     def initialize(self):
         self.incr = 0
-        self.sale_price = None
 
     def handle_data(self, data):
         if self.incr == 0:
@@ -259,6 +278,37 @@ class TestOrderInstantAlgorithm(TradingAlgorithm):
         self.incr += 2
         self.order_value(0, data[0].price * 2.)
         self.last_price = data[0].price
+
+
+class TestOrderStyleForwardingAlgorithm(TradingAlgorithm):
+    """
+    Test Algorithm for verifying that ExecutionStyles are properly forwarded by
+    order API helper methods.  Pass the name of the method to be tested as a
+    string parameter to this algorithm's constructor.
+    """
+
+    def __init__(self, *args, **kwargs):
+        self.method_name = kwargs.pop('method_name')
+        super(TestOrderStyleForwardingAlgorithm, self)\
+            .__init__(*args, **kwargs)
+
+    def initialize(self):
+        self.incr = 0
+        self.last_price = None
+
+    def handle_data(self, data):
+        if self.incr == 0:
+            assert len(self.portfolio.positions.keys()) == 0
+
+            method_to_check = getattr(self, self.method_name)
+            method_to_check(0, data[0].price, style=StopLimitOrder(10, 10))
+
+            assert len(self.blotter.open_orders[0]) == 1
+            result = self.blotter.open_orders[0][0]
+            assert result.limit == 10
+            assert result.stop == 10
+
+            self.incr += 1
 
 
 class TestOrderValueAlgorithm(TradingAlgorithm):
@@ -359,7 +409,39 @@ class TestTargetValueAlgorithm(TradingAlgorithm):
         self.target_shares = np.round(20 / data[0].price)
 
 
-from zipline.algorithm import TradingAlgorithm
+############################
+# TradingControl Test Algos#
+############################
+
+
+class SetMaxPositionSizeAlgorithm(TradingAlgorithm):
+    def initialize(self, sid=None, max_shares=None, max_notional=None):
+        self.order_count = 0
+        self.set_max_position_size(sid=sid,
+                                   max_shares=max_shares,
+                                   max_notional=max_notional)
+
+
+class SetMaxOrderSizeAlgorithm(TradingAlgorithm):
+    def initialize(self, sid=None, max_shares=None, max_notional=None):
+        self.order_count = 0
+        self.set_max_order_size(sid=sid,
+                                max_shares=max_shares,
+                                max_notional=max_notional)
+
+
+class SetMaxOrderCountAlgorithm(TradingAlgorithm):
+    def initialize(self, count):
+        self.order_count = 0
+        self.set_max_order_count(count)
+
+
+class SetLongOnlyAlgorithm(TradingAlgorithm):
+    def initialize(self):
+        self.order_count = 0
+        self.set_long_only()
+
+
 from zipline.transforms import BatchTransform, batch_transform
 from zipline.transforms import MovingAverage
 
@@ -374,6 +456,61 @@ class TestRegisterTransformAlgorithm(TradingAlgorithm):
 
     def handle_data(self, data):
         pass
+
+
+class AmbitiousStopLimitAlgorithm(TradingAlgorithm):
+    """
+    Algorithm that tries to buy with extremely low stops/limits and tries to
+    sell with extremely high versions of same. Should not end up with any
+    positions for reasonable data.
+    """
+
+    def initialize(self, *args, **kwargs):
+        self.sid = kwargs.pop('sid')
+
+    def handle_data(self, data):
+
+        ########
+        # Buys #
+        ########
+
+        # Buy with low limit, shouldn't trigger.
+        self.order(self.sid, 100, limit_price=1)
+
+        # But with high stop, shouldn't trigger
+        self.order(self.sid, 100, stop_price=10000000)
+
+        # Buy with high limit (should trigger) but also high stop (should
+        # prevent trigger).
+        self.order(self.sid, 100, limit_price=10000000, stop_price=10000000)
+
+        # Buy with low stop (should trigger), but also low limit (should
+        # prevent trigger).
+        self.order(self.sid, 100, limit_price=1, stop_price=1)
+
+        #########
+        # Sells #
+        #########
+
+        # Sell with high limit, shouldn't trigger.
+        self.order(self.sid, -100, limit_price=1000000)
+
+        # Sell with low stop, shouldn't trigger.
+        self.order(self.sid, -100, stop_price=1)
+
+        # Sell with low limit (should trigger), but also high stop (should
+        # prevent trigger).
+        self.order(self.sid, -100, limit_price=1000000, stop_price=1000000)
+
+        # Sell with low limit (should trigger), but also low stop (should
+        # prevent trigger).
+        self.order(self.sid, -100, limit_price=1, stop_price=1)
+
+        ###################
+        # Rounding Checks #
+        ###################
+        self.order(self.sid, 100, limit_price=.00000001)
+        self.order(self.sid, -100, stop_price=.00000001)
 
 
 ##########################################
@@ -673,6 +810,63 @@ class EmptyPositionsAlgorithm(TradingAlgorithm):
         self.record(num_positions=len(self.portfolio.positions))
 
 
+class InvalidOrderAlgorithm(TradingAlgorithm):
+    """
+    An algorithm that tries to make various invalid order calls, verifying that
+    appropriate exceptions are raised.
+    """
+    def initialize(self, *args, **kwargs):
+        self.sid = kwargs.pop('sids')[0]
+
+    def handle_data(self, data):
+        from zipline.api import (
+            order_percent,
+            order_target,
+            order_target_percent,
+            order_target_value,
+            order_value,
+        )
+
+        for style in [MarketOrder(), LimitOrder(10),
+                      StopOrder(10), StopLimitOrder(10, 10)]:
+
+            with assert_raises(UnsupportedOrderParameters):
+                order(self.sid, 10, limit_price=10, style=style)
+
+            with assert_raises(UnsupportedOrderParameters):
+                order(self.sid, 10, stop_price=10, style=style)
+
+            with assert_raises(UnsupportedOrderParameters):
+                order_value(self.sid, 300, limit_price=10, style=style)
+
+            with assert_raises(UnsupportedOrderParameters):
+                order_value(self.sid, 300, stop_price=10, style=style)
+
+            with assert_raises(UnsupportedOrderParameters):
+                order_percent(self.sid, .1, limit_price=10, style=style)
+
+            with assert_raises(UnsupportedOrderParameters):
+                order_percent(self.sid, .1, stop_price=10, style=style)
+
+            with assert_raises(UnsupportedOrderParameters):
+                order_target(self.sid, 100, limit_price=10, style=style)
+
+            with assert_raises(UnsupportedOrderParameters):
+                order_target(self.sid, 100, stop_price=10, style=style)
+
+            with assert_raises(UnsupportedOrderParameters):
+                order_target_value(self.sid, 100, limit_price=10, style=style)
+
+            with assert_raises(UnsupportedOrderParameters):
+                order_target_value(self.sid, 100, stop_price=10, style=style)
+
+            with assert_raises(UnsupportedOrderParameters):
+                order_target_percent(self.sid, .2, limit_price=10, style=style)
+
+            with assert_raises(UnsupportedOrderParameters):
+                order_target_percent(self.sid, .2, stop_price=10, style=style)
+
+
 ##############################
 # Quantopian style algorithms
 from zipline.api import (order,
@@ -745,6 +939,16 @@ def handle_data(context, data):
     record(incr=context.incr)
 """
 
+api_get_environment_algo = """
+from zipline.api import get_environment, order, symbol
+
+
+def initialize(context):
+    context.environment = get_environment()
+
+handle_data = lambda context, data: order(symbol(0), 1)
+"""
+
 api_symbol_algo = """
 from zipline.api import (order,
                          symbol)
@@ -754,6 +958,35 @@ def initialize(context):
 
 def handle_data(context, data):
     order(symbol(0), 1)
+"""
+
+call_order_in_init = """
+from zipline.api import (order)
+
+def initialize(context):
+    order(0, 10)
+    pass
+
+def handle_data(context, data):
+    pass
+"""
+
+access_portfolio_in_init = """
+def initialize(context):
+    var = context.portfolio.cash
+    pass
+
+def handle_data(context, data):
+    pass
+"""
+
+access_account_in_init = """
+def initialize(context):
+    var = context.account.settled_cash
+    pass
+
+def handle_data(context, data):
+    pass
 """
 
 call_all_order_methods = """
